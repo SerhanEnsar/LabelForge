@@ -1,12 +1,12 @@
 # LabelForge — YOLO Dataset Editor (Tactical Edition)
 
-![Main Screen View](assets/images/Ekran%20Resmi%202026-05-17%2001.54.54.png)
+![Main Screen View](assets/images/main_screen.png)
 
 LabelForge is a powerful desktop application developed to quickly, reliably, and thoroughly edit, inspect, and expand YOLO format datasets, which are frequently used in computer vision projects. Its special "Tactical" (dark green/black) theme enables long working hours without eye strain. The application is developed using Tkinter, CustomTkinter, and Pillow (PIL), offering high-performance image and label manipulation.
 
 ## Core Features
 
-![Features View](assets/images/Ekran%20Resmi%202026-05-17%2001.55.39.png)
+![Features View](assets/images/features.png)
 
 ### Modern and Advanced User Interface
 
@@ -20,7 +20,7 @@ Unlike classic and boring interfaces, LabelForge offers a "Dark" themed design b
 
 ### Professional Bounding Box (BBox) Drawing and Editing
 
-![BBox Drawing Screen](assets/images/Ekran%20Resmi%202026-05-17%2001.55.53.png)
+![BBox Drawing Screen](assets/images/bbox_drawing.png)
 
 - **Advanced Viewing:** Precise zooming with the mouse wheel (Scroll/Pinch) and panning (dragging) are available. The "FIT" button instantly resets the image to its original view.
 - **Manual Drawing Mode:** A special "Draw Manual BBox" screen can be opened for missing or new objects to be detected. From here, you can select the desired class and add new bounding boxes using the drag-and-drop method.
@@ -29,7 +29,7 @@ Unlike classic and boring interfaces, LabelForge offers a "Dark" themed design b
 
 ### Full Screen Detail View - Bulk Selection and Deletion Feature
 
-![Full Screen Inspection](assets/images/Ekran%20Resmi%202026-05-17%2001.56.11.png)
+![Full Screen Inspection](assets/images/fullscreen.png)
 
 To better inspect small details in images, "Original" or "Annotated" images can be opened in a full-screen window. Advanced mouse and keyboard controls remain active while in full-screen mode.
 
@@ -71,7 +71,7 @@ To run the project on your computer, the following Python libraries must be inst
 
 ## User Guide
 
-![User Interface](assets/images/Ekran%20Resmi%202026-05-17%2001.57.47.png)
+![User Interface](assets/images/user_interface.png)
 
 After launching the project, you can start the labeling process by following these steps:
 
