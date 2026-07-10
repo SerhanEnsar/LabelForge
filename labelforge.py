@@ -502,6 +502,12 @@ class DrawModeWindow(ctk.CTkToplevel):
         self._sel_cid = tk.IntVar(value=next(iter(sorted(app.class_names)), 0))
         self._rjob = None
 
+        # kutu çizerken imlecin tam nereye denk geldiğini görmek için crosshair ekledim
+        self._cross_x    = None
+        self._cross_y    = None
+        self._cross_h_id = None
+        self._cross_v_id = None
+
         self._build()
         self.after(130, self._render)
 
@@ -582,6 +588,9 @@ class DrawModeWindow(ctk.CTkToplevel):
         self.cv.bind("<ButtonRelease-2>", self._pan_end)
         self.cv.bind("<MouseWheel>",      self._scroll)
         self.cv.bind("<Configure>",       lambda e: self._schedule_render())
+        # crosshair imleci takip etsin diye motion/leave bağladım
+        self.cv.bind("<Motion>",          self._on_motion)
+        self.cv.bind("<Leave>",           self._on_leave)
         # Arrow key pan & keyboard zoom
         self.bind("<Left>",  lambda e: self._pan_key(-24, 0))
         self.bind("<Right>", lambda e: self._pan_key(24, 0))
@@ -664,6 +673,7 @@ class DrawModeWindow(ctk.CTkToplevel):
         self._tk = ImageTk.PhotoImage(base)
         self.cv.delete("all")
         self.cv.create_image(int(self._ox), int(self._oy), anchor="nw", image=self._tk)
+        self._draw_crosshair()  # delete("all") crosshair'i de siliyor, o yüzden her render'da yeniden çiziyorum
 
     def _scroll(self, event):
         if event.delta == 0:
@@ -718,10 +728,47 @@ class DrawModeWindow(ctk.CTkToplevel):
         self._ox += event.x - self._pan_pos[0]
         self._oy += event.y - self._pan_pos[1]
         self._pan_pos = (event.x, event.y)
+        self._update_crosshair(event.x, event.y)   # kaydırırken de crosshair güncel kalsın
         self._schedule_render()
 
     def _pan_end(self, event):
         self._pan_pos = None
+
+    # ── crosshair (imlecin yatay/dikey izdüşüm çizgileri) ────────────────────
+
+    def _on_motion(self, event):
+        self._update_crosshair(event.x, event.y)
+
+    def _on_leave(self, event):
+        # imleç canvas dışına çıkınca çizgiler ekranda asılı kalmasın
+        self._cross_x = None
+        self._cross_y = None
+        self._draw_crosshair()
+
+    def _update_crosshair(self, x: int, y: int):
+        self._cross_x, self._cross_y = x, y
+        self._draw_crosshair()
+
+    def _draw_crosshair(self):
+        # önce eskisini temizle
+        if self._cross_h_id:
+            self.cv.delete(self._cross_h_id)
+            self._cross_h_id = None
+        if self._cross_v_id:
+            self.cv.delete(self._cross_v_id)
+            self._cross_v_id = None
+        if self._cross_x is None or self._cross_y is None:
+            return
+        cw, ch = self.cv.winfo_width(), self.cv.winfo_height()
+        color = T.ACC2
+        # yatay çizgi (imlecin y'sinden tam genişlik)
+        self._cross_h_id = self.cv.create_line(
+            0, self._cross_y, cw, self._cross_y,
+            fill=color, width=1, dash=(3, 3))
+        # dikey çizgi (imlecin x'inden tam yükseklik)
+        self._cross_v_id = self.cv.create_line(
+            self._cross_x, 0, self._cross_x, ch,
+            fill=color, width=1, dash=(3, 3))
 
     def _press(self, event):
         self._drawing = True
@@ -738,6 +785,7 @@ class DrawModeWindow(ctk.CTkToplevel):
         self._rect_id = self.cv.create_rectangle(
             self._sx, self._sy, event.x, event.y,
             outline=color, width=2, dash=(5, 3))
+        self._update_crosshair(event.x, event.y)  # çizerken de crosshair sürüklenen köşeyi göstersin
 
     def _release(self, event):
         if not self._drawing:
@@ -774,11 +822,20 @@ class DrawModeWindow(ctk.CTkToplevel):
         prev = len(self.app.label_entries)
         self.app._push_undo()
         self.app.label_entries = self.label_entries
-        self.app._commit_labels()
+        # dosya var mıydı diye burada bakıyorum, commit sonrası current_lbl_path zaten dolu oluyor
+        existed_before = bool(self.app.current_lbl_path) and os.path.exists(self.app.current_lbl_path)
+        if not self.app._commit_labels():
+            # Kaydetme başarısız oldu (ör. label klasörü seçilmemiş) —
+            # pencereyi kapatma, çizilen kutular kaybolmasın.
+            return
         self.app._populate_label_entries()
         self.app._refresh_images()
         added = len(self.label_entries) - prev
-        self.app.log.log(f"{added} manuel BBox eklendi.", "action")
+        verb  = "güncellendi" if existed_before else "oluşturuldu"  # kullanıcıya net olsun diye ayırdım
+        fname = os.path.basename(self.app.current_lbl_path)
+        self.app.log.log(
+            f"Label dosyası {verb}: {fname}  //  +{added} yeni BBox  //  toplam {len(self.label_entries)}",
+            "action")
         self.destroy()
 
 
@@ -1431,9 +1488,12 @@ class LabelForgeApp(ctk.CTk):
             dot.create_oval(1, 1, 8, 8, fill=color, outline="")
             dot.bind("<Button-1>", lambda e, idx=i: self._click_entry(idx, e))
 
-            tk.Label(row, text=f"[{cid}] {name}", bg=bg,
+            # sınıf ismine tıklayınca değiştirebilsin diye ekledim, aşağıda menü açılıyor
+            name_lbl = tk.Label(row, text=f"[{cid}] {name}  ▾", bg=bg,
                      fg=T.HLBX if sel else color,
-                     font=("Courier", 9, "bold")).pack(side="left", padx=(0, 4))
+                     font=("Courier", 9, "bold"), cursor="hand2")
+            name_lbl.pack(side="left", padx=(0, 4))
+            name_lbl.bind("<Button-1>", lambda e, idx=i: self._open_class_picker(idx))
 
             tk.Label(row, text=f"cx{cx:.3f} cy{cy:.3f} {bw:.3f}×{bh:.3f}",
                      bg=bg, fg=T.TX3, font=("Courier", 7)
@@ -1461,6 +1521,45 @@ class LabelForgeApp(ctk.CTk):
 
     def _delete_entry(self, index: int):
         self._delete_entries([index])
+
+    def _open_class_picker(self, idx: int):
+        # class değiştirmek için önce tanımlı sınıfları listeliyorum, seçince aşağıda uyguluyorum
+        if not (0 <= idx < len(self.label_entries)):
+            return
+        if not self.class_names:
+            self.log.log("Önce en az bir sınıf tanımlayın (Manuel BBox Çiz → + YENİ SINIF).",
+                          "warning")
+            return
+        current_cid = int(self.label_entries[idx][0])
+        menu = tk.Menu(self, tearoff=0, bg=T.BG2, fg=T.TX1,
+                       activebackground=T.SEL, activeforeground=T.ACC,
+                       font=("Courier", 10))
+        for cid in sorted(self.class_names.keys()):
+            mark  = "●" if cid == current_cid else " "   # şu anki sınıfı işaretle
+            label = f"  {mark}  {cid}: {self.class_names[cid]}"
+            menu.add_command(label=label,
+                              command=lambda c=cid, i=idx: self._set_entry_class(i, c))
+        try:
+            menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            menu.grab_release()
+
+    def _set_entry_class(self, idx: int, new_cid: int):
+        # menüden seçilen sınıfı o kutuya uygula, geri alınabilsin diye undo'ya da ekle
+        if not (0 <= idx < len(self.label_entries)):
+            return
+        old_cid = int(self.label_entries[idx][0])
+        if old_cid == new_cid:
+            return
+        self._push_undo()
+        self.label_entries[idx][0] = new_cid
+        self._commit_labels()
+        self._populate_label_entries()
+        self._refresh_images()
+        old_name = self.class_names.get(old_cid, f"#{old_cid}")
+        new_name = self.class_names.get(new_cid, f"#{new_cid}")
+        self.log.log(f"BBox sınıfı değiştirildi: [{old_cid}] {old_name} → [{new_cid}] {new_name}",
+                      "action")
 
     def _delete_entries(self, indices: list):
         if not indices:
@@ -1616,20 +1715,28 @@ class LabelForgeApp(ctk.CTk):
 
     # ── Label File I/O ────────────────────────────────────────────────────────
 
-    def _commit_labels(self):
+    def _commit_labels(self) -> bool:
+        # dosya yoksa oluşturuyor, varsa üzerine yazıp güncelliyor.
+        # artık True/False dönüyor ki çağıran taraf kayıt başarısız olursa anlayabilsin
         if not self.current_lbl_path:
             if not (self.lbl_dir_var.get() and 0 <= self.selected_index < len(self.image_files)):
                 messagebox.showwarning("Uyarı", "Label klasörü belirlenmedi.", parent=self)
-                return
+                return False
             base = os.path.splitext(self.image_files[self.selected_index])[0]
             self.current_lbl_path = os.path.join(self.lbl_dir_var.get(), base + ".txt")
         parent = os.path.dirname(self.current_lbl_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(self.current_lbl_path, "w") as f:
-            for entry in self.label_entries:
-                cid, cx, cy, bw, bh = int(entry[0]), *[float(v) for v in entry[1:5]]
-                f.write(f"{cid} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\n")
+        try:  # yazma sırasında bir şeyler ters giderse (izin, disk vs.) sessizce yutmayalım
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(self.current_lbl_path, "w") as f:
+                for entry in self.label_entries:
+                    cid, cx, cy, bw, bh = int(entry[0]), *[float(v) for v in entry[1:5]]
+                    f.write(f"{cid} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\n")
+        except Exception as ex:
+            messagebox.showerror("Hata", f"Label dosyası yazılamadı:\n{self.current_lbl_path}\n\n{ex}",
+                                  parent=self)
+            return False
+        return True
 
     # ── Finder ────────────────────────────────────────────────────────────────
 
