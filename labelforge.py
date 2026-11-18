@@ -84,6 +84,35 @@ def fit_pil(img: Image.Image, mw: int, mh: int) -> Image.Image:
     sc = min(mw / iw, mh / ih)
     return img.resize((max(1, int(iw * sc)), max(1, int(ih * sc))), Image.LANCZOS)
 
+def parse_label_line(line: str):
+    """YOLO satırını entry'ye çevirir.
+
+    Detect  : `cid cx cy w h`                  -> [cid, cx, cy, w, h]
+    Segment : `cid x1 y1 x2 y2 ... xn yn`      -> [cid, cx, cy, w, h, poly]
+              poly: normalize (0-1) düz koordinat listesi; cx/cy/w/h poligondan türetilir.
+    Tanınmayan satırlar None döner.
+    """
+    parts = line.strip().split()
+    if len(parts) == 5:
+        return [int(parts[0])] + [float(x) for x in parts[1:5]]
+    if len(parts) >= 7 and len(parts) % 2 == 1:
+        cid = int(parts[0])
+        coords = [float(x) for x in parts[1:]]
+        xs, ys = coords[0::2], coords[1::2]
+        x1, x2, y1, y2 = min(xs), max(xs), min(ys), max(ys)
+        return [cid, (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1, coords]
+    return None
+
+
+def format_label_line(entry: list) -> str:
+    """Entry'yi YOLO satırına çevirir (poligon varsa segment formatında yazar)."""
+    cid = int(entry[0])
+    if len(entry) >= 6 and entry[5]:
+        return f"{cid} " + " ".join(f"{v:.6f}" for v in entry[5])
+    cx, cy, bw, bh = (float(v) for v in entry[1:5])
+    return f"{cid} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
+
+
 def draw_boxes(pil_img: Image.Image, entries: list, class_names: dict,
                selected: set = None) -> Image.Image:
     img = pil_img.copy()
@@ -100,8 +129,12 @@ def draw_boxes(pil_img: Image.Image, entries: list, class_names: dict,
         is_sel = idx in sel
         color  = T.HLBX if is_sel else get_color(cid)
         thick  = 4 if is_sel else 2
-        for t in range(thick):
-            draw.rectangle([x1 - t, y1 - t, x2 + t, y2 + t], outline=color)
+        if len(entry) >= 6 and entry[5]:
+            pts = [(entry[5][i] * w, entry[5][i + 1] * h) for i in range(0, len(entry[5]), 2)]
+            draw.polygon(pts, outline=color)
+        else:
+            for t in range(thick):
+                draw.rectangle([x1 - t, y1 - t, x2 + t, y2 + t], outline=color)
         name = class_names.get(cid, f"#{cid}")
         lbl  = f"{cid}: {name}"
         try:
@@ -319,7 +352,15 @@ class FullscreenWindow(ctk.CTkToplevel):
         color = T.HLBX if is_sel else get_color(cid)
         width = 3 if is_sel else 2
         # Outline only — no fill (fixes the "#ffffff18" invalid color crash)
-        self.cv.create_rectangle(x1, y1, x2, y2, outline=color, width=width)
+        if len(entry) >= 6 and entry[5]:
+            # Segment: poligonu tuval koordinatına çevir (ölçek + kaydırma)
+            ox, oy = int(self._ox), int(self._oy)
+            flat = []
+            for i in range(0, len(entry[5]), 2):
+                flat += [entry[5][i] * nw + ox, entry[5][i + 1] * nh + oy]
+            self.cv.create_polygon(*flat, outline=color, fill="", width=width)
+        else:
+            self.cv.create_rectangle(x1, y1, x2, y2, outline=color, width=width)
         name = self.app.class_names.get(cid, f"#{cid}")
         lbl  = f"{cid}: {name}"
         llen = max(8, len(lbl)) * 7
@@ -501,6 +542,9 @@ class DrawModeWindow(ctk.CTkToplevel):
         self._pan_pos  = None    # right-click pan start
         self._sel_cid = tk.IntVar(value=next(iter(sorted(app.class_names)), 0))
         self._rjob = None
+        self._mode     = "bbox"   # "bbox" | "poly"
+        self._poly_pts = []       # bekleyen poligon köşeleri (görüntü piksel koordinatı)
+        self._cursor   = None     # poligon önizlemesi için fare konumu (ekran)
 
         self._build()
         self.after(130, self._render)
@@ -550,6 +594,11 @@ class DrawModeWindow(ctk.CTkToplevel):
                       text_color=T.TX1, font=("Courier", 9),
                       corner_radius=3, command=self._undo_last
                       ).pack(side="right", padx=4, pady=7)
+        self._mode_btn = ctk.CTkButton(tb, text="▭ BBOX", width=96, height=28,
+                      fg_color=T.BG2, hover_color=T.BG3,
+                      text_color=T.ACC2, font=("Courier", 9, "bold"),
+                      corner_radius=3, command=self._toggle_mode)
+        self._mode_btn.pack(side="right", padx=4, pady=7)
         # Zoom buttons
         ctk.CTkButton(tb, text="FIT", width=36, height=26,
                       fg_color=T.BG2, hover_color=T.BG3,
@@ -582,6 +631,11 @@ class DrawModeWindow(ctk.CTkToplevel):
         self.cv.bind("<ButtonRelease-2>", self._pan_end)
         self.cv.bind("<MouseWheel>",      self._scroll)
         self.cv.bind("<Configure>",       lambda e: self._schedule_render())
+        self.cv.bind("<Motion>",          self._on_motion)
+        # Poligon kısayolları
+        self.bind("<Return>",    lambda e: self._poly_close() if self._mode == "poly" else None)
+        self.bind("<BackSpace>", lambda e: self._poly_back() if self._mode == "poly" else None)
+        self.bind("<Escape>",    lambda e: self._poly_cancel())
         # Arrow key pan & keyboard zoom
         self.bind("<Left>",  lambda e: self._pan_key(-24, 0))
         self.bind("<Right>", lambda e: self._pan_key(24, 0))
@@ -664,6 +718,7 @@ class DrawModeWindow(ctk.CTkToplevel):
         self._tk = ImageTk.PhotoImage(base)
         self.cv.delete("all")
         self.cv.create_image(int(self._ox), int(self._oy), anchor="nw", image=self._tk)
+        self._draw_poly_preview()
 
     def _scroll(self, event):
         if event.delta == 0:
@@ -724,6 +779,9 @@ class DrawModeWindow(ctk.CTkToplevel):
         self._pan_pos = None
 
     def _press(self, event):
+        if self._mode == "poly":
+            self._poly_click(event)
+            return
         self._drawing = True
         self._sx, self._sy = event.x, event.y
         if self._rect_id:
@@ -763,6 +821,91 @@ class DrawModeWindow(ctk.CTkToplevel):
         name = self.class_names.get(cid, f"#{cid}")
         self._st_var.set(f"Eklendi → [{cid}] {name}  //  Toplam: {len(self.label_entries)}")
         self._render()
+
+    # ── Poligon modu ──────────────────────────────────────────────────────────
+
+    def _toggle_mode(self):
+        self._poly_pts = []
+        self._cursor = None
+        if self._mode == "bbox":
+            self._mode = "poly"
+            self._mode_btn.configure(text="⬠ POLİGON")
+            self._st_var.set("POLİGON: sol tık = köşe  |  ilk köşe veya ENTER = kapat  |  BACKSPACE = geri  |  ESC = iptal")
+        else:
+            self._mode = "bbox"
+            self._mode_btn.configure(text="▭ BBOX")
+            self._st_var.set("BBOX modu: sürükleyerek kutu çiz.")
+        self._draw_poly_preview()
+
+    def _screen_to_img(self, ex: float, ey: float):
+        iw, ih = self.pil_image.size
+        ix = max(0.0, min(float(iw), (ex - self._ox) / self._scale))
+        iy = max(0.0, min(float(ih), (ey - self._oy) / self._scale))
+        return ix, iy
+
+    def _poly_click(self, event):
+        # İlk köşeye (10 px içinde) tıklanırsa poligonu kapat
+        if len(self._poly_pts) >= 3:
+            fx = self._poly_pts[0][0] * self._scale + self._ox
+            fy = self._poly_pts[0][1] * self._scale + self._oy
+            if abs(fx - event.x) <= 10 and abs(fy - event.y) <= 10:
+                self._poly_close()
+                return
+        self._poly_pts.append(self._screen_to_img(event.x, event.y))
+        self._st_var.set(f"Köşe {len(self._poly_pts)}  //  ilk köşeye tıkla veya ENTER: kapat")
+        self._draw_poly_preview()
+
+    def _poly_close(self):
+        if len(self._poly_pts) < 3:
+            self._st_var.set("Poligon için en az 3 köşe gerekli.")
+            return
+        iw, ih = self.pil_image.size
+        norm = []
+        for x, y in self._poly_pts:
+            norm += [x / iw, y / ih]
+        xs, ys = norm[0::2], norm[1::2]
+        x1, x2, y1, y2 = min(xs), max(xs), min(ys), max(ys)
+        cid = self._sel_cid.get()
+        self.label_entries.append([cid, (x1 + x2) / 2, (y1 + y2) / 2,
+                                   x2 - x1, y2 - y1, norm])
+        self._poly_pts = []
+        self._cursor = None
+        name = self.class_names.get(cid, f"#{cid}")
+        self._st_var.set(f"Poligon eklendi → [{cid}] {name}  //  Toplam: {len(self.label_entries)}")
+        self._render()
+
+    def _poly_back(self):
+        if self._poly_pts:
+            self._poly_pts.pop()
+            self._st_var.set(f"Köşe geri alındı. Kalan köşe: {len(self._poly_pts)}")
+            self._draw_poly_preview()
+
+    def _poly_cancel(self):
+        if self._poly_pts:
+            self._poly_pts = []
+            self._cursor = None
+            self._st_var.set("Bekleyen poligon iptal edildi.")
+            self._draw_poly_preview()
+
+    def _on_motion(self, event):
+        if self._mode == "poly" and self._poly_pts:
+            self._cursor = (event.x, event.y)
+            self._draw_poly_preview()
+
+    def _draw_poly_preview(self):
+        self.cv.delete("preview")
+        if self._mode != "poly" or not self._poly_pts:
+            return
+        color = get_color(self._sel_cid.get())
+        pts = [(x * self._scale + self._ox, y * self._scale + self._oy)
+               for x, y in self._poly_pts]
+        line_pts = pts + ([self._cursor] if self._cursor else [])
+        if len(line_pts) >= 2:
+            flat = [c for p in line_pts for c in p]
+            self.cv.create_line(*flat, fill=color, width=2, dash=(5, 3), tags="preview")
+        for px, py in pts:
+            self.cv.create_oval(px - 4, py - 4, px + 4, py + 4,
+                                outline=color, fill=color, tags="preview")
 
     def _undo_last(self):
         if self.label_entries:
@@ -1370,10 +1513,9 @@ class LabelForgeApp(ctk.CTk):
             try:
                 with open(path) as f:
                     for line in f:
-                        parts = line.strip().split()
-                        if len(parts) >= 5:
-                            self.label_entries.append(
-                                [int(parts[0])] + [float(x) for x in parts[1:5]])
+                        entry = parse_label_line(line)
+                        if entry is not None:
+                            self.label_entries.append(entry)
             except Exception:
                 pass
 
@@ -1628,8 +1770,7 @@ class LabelForgeApp(ctk.CTk):
             os.makedirs(parent, exist_ok=True)
         with open(self.current_lbl_path, "w") as f:
             for entry in self.label_entries:
-                cid, cx, cy, bw, bh = int(entry[0]), *[float(v) for v in entry[1:5]]
-                f.write(f"{cid} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\n")
+                f.write(format_label_line(entry) + "\n")
 
     # ── Finder ────────────────────────────────────────────────────────────────
 
