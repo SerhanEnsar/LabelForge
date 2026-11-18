@@ -131,7 +131,8 @@ def draw_boxes(pil_img: Image.Image, entries: list, class_names: dict,
         thick  = 4 if is_sel else 2
         if len(entry) >= 6 and entry[5]:
             pts = [(entry[5][i] * w, entry[5][i + 1] * h) for i in range(0, len(entry[5]), 2)]
-            draw.polygon(pts, outline=color)
+            # Kalın çizgi: PIL polygon varsayılanı 1 px, bu yüzden line ile kalınlık veriyoruz
+            draw.line(pts + [pts[0]], fill=color, width=thick + 1, joint="curve")
         else:
             for t in range(thick):
                 draw.rectangle([x1 - t, y1 - t, x2 + t, y2 + t], outline=color)
@@ -358,7 +359,7 @@ class FullscreenWindow(ctk.CTkToplevel):
             flat = []
             for i in range(0, len(entry[5]), 2):
                 flat += [entry[5][i] * nw + ox, entry[5][i + 1] * nh + oy]
-            self.cv.create_polygon(*flat, outline=color, fill="", width=width)
+            self.cv.create_polygon(*flat, outline=color, fill="", width=width + 1)
         else:
             self.cv.create_rectangle(x1, y1, x2, y2, outline=color, width=width)
         name = self.app.class_names.get(cid, f"#{cid}")
