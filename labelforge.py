@@ -10,6 +10,10 @@ import customtkinter as ctk
 from PIL import Image, ImageTk, ImageDraw
 from skew import apply_h, square_polygon, warp_image
 from polyfix import self_intersects, repair_polygon
+from polyedit import (edge_map, flat_to_pairs, grabcut_polygon, nearest_vertex,
+                      point_in_polygon, refresh_bbox, snap_to_edge)
+import numpy as np
+import cv2
 from typing import Optional
 
 ctk.set_appearance_mode("Dark")
@@ -153,7 +157,64 @@ def draw_boxes(pil_img: Image.Image, entries: list, class_names: dict,
 
 # ── FullscreenWindow ──────────────────────────────────────────────────────────
 
-class FullscreenWindow(ctk.CTkToplevel):
+SNAP_RADIUS = 8     # görüntü pikseli; köşe bu kadar yakında bir kenar varsa oraya yapışır
+VERTEX_TOL = 8      # ekran pikseli; köşe tutma yarıçapı
+
+
+class VertexEditMixin:
+    """Seçili poligonun köşelerini göster ve sürükle. Alt sınıf şunları sağlar:
+    _v_size, _v_to_screen, _v_to_norm, _v_selection, _v_redraw, _v_after_edit; app.get_edges."""
+
+    def _v_selected_poly(self):
+        sel = self._v_selection()
+        if len(sel) != 1:
+            return None
+        i = next(iter(sel))
+        if i >= len(self.app.label_entries):
+            return None
+        e = self.app.label_entries[i]
+        return i if (len(e) >= 6 and e[5]) else None
+
+    def _v_try_start(self, sx, sy) -> bool:
+        i = self._v_selected_poly()
+        if i is None:
+            return False
+        pairs = flat_to_pairs(self.app.label_entries[i][5])
+        screen = [self._v_to_screen(x, y) for x, y in pairs]
+        k = nearest_vertex(screen, sx, sy, VERTEX_TOL)
+        if k is None:
+            return False
+        self.app._push_undo()          # sürükleme başlamadan önceki hali geri alınabilsin
+        self._v_drag = (i, k)
+        return True
+
+    def _v_move(self, sx, sy):
+        i, k = self._v_drag
+        W, H = self._v_size()
+        nx, ny = self._v_to_norm(sx, sy)
+        px, py = nx * W, ny * H
+        edges = self.app.get_edges()
+        if edges is not None:
+            px, py = snap_to_edge(edges, px, py, radius=SNAP_RADIUS)
+        flat = self.app.label_entries[i][5]
+        flat[2 * k] = min(max(px / W, 0.0), 1.0)
+        flat[2 * k + 1] = min(max(py / H, 0.0), 1.0)
+        refresh_bbox(self.app.label_entries[i])
+        self._v_redraw()
+
+    def _v_end(self):
+        if getattr(self, "_v_drag", None) is None:
+            return
+        self._v_drag = None
+        self.app._commit_labels()
+        self._v_after_edit()
+
+    def _v_handles(self, entry):
+        """Seçili poligonun köşe koordinatları (ekran)."""
+        return [self._v_to_screen(x, y) for x, y in flat_to_pairs(entry[5])]
+
+
+class FullscreenWindow(VertexEditMixin, ctk.CTkToplevel):
 
     def __init__(self, app: "LabelForgeApp", mode: str):
         super().__init__(app)
@@ -341,6 +402,11 @@ class FullscreenWindow(ctk.CTkToplevel):
         if self.mode == "annotated":
             for idx, entry in enumerate(self.app.label_entries):
                 self._draw_box(idx, entry, nw, nh)
+            sp = self._v_selected_poly()
+            if sp is not None:
+                for hx, hy in self._v_handles(self.app.label_entries[sp]):
+                    self.cv.create_rectangle(hx - 4, hy - 4, hx + 4, hy + 4,
+                                             fill=T.HLBX, outline=T.BG0, width=1)
 
         n_sel = len(self._sel)
         self._st.configure(
@@ -418,7 +484,36 @@ class FullscreenWindow(ctk.CTkToplevel):
         self._oy += dy
         self._schedule_render(delay=8)
 
+    # ── köşe düzenleme adaptörü ──────────────────────────────────────────────
+
+    def _v_size(self):
+        return self.app._orig_pil.size
+
+    def _v_selection(self):
+        return self._sel
+
+    def _v_to_screen(self, nx, ny):
+        nw = max(1, int(self._img_w * self._scale))
+        nh = max(1, int(self._img_h * self._scale))
+        return nx * nw + int(self._ox), ny * nh + int(self._oy)
+
+    def _v_to_norm(self, sx, sy):
+        nw = max(1, int(self._img_w * self._scale))
+        nh = max(1, int(self._img_h * self._scale))
+        return (sx - int(self._ox)) / nw, (sy - int(self._oy)) / nh
+
+    def _v_redraw(self):
+        self._schedule_render(delay=1)
+
+    def _v_after_edit(self):
+        self.app._populate_label_entries()
+        self.app._refresh_images()
+
     def _press(self, event):
+        if self.mode == "annotated" and self._v_try_start(event.x, event.y):
+            self._v_drag_active = True
+            self._box_clicked = True
+            return
         if self.mode == "annotated":
             hit = self._find_box_at(event.x, event.y)
             if hit is not None:
@@ -441,6 +536,9 @@ class FullscreenWindow(ctk.CTkToplevel):
         self._is_panning  = False
 
     def _motion(self, event):
+        if getattr(self, '_v_drag_active', False):
+            self._v_move(event.x, event.y)
+            return
         if self._box_clicked or self._pan_start is None:
             return
 
@@ -469,6 +567,11 @@ class FullscreenWindow(ctk.CTkToplevel):
             self._schedule_render(delay=8)
 
     def _release(self, event):
+        if getattr(self, '_v_drag_active', False):
+            self._v_drag_active = False
+            self._box_clicked = False
+            self._v_end()
+            return
         if self._box_clicked:
             self._box_clicked = False
             return
@@ -616,6 +719,11 @@ class DrawModeWindow(ctk.CTkToplevel):
                       text_color=T.ACC2, font=("Courier", 9, "bold"),
                       corner_radius=3, command=self._toggle_mode)
         self._mode_btn.pack(side="right", padx=4, pady=7)
+        self._auto_btn = ctk.CTkButton(tb, text="◎ OTO", width=84, height=28,
+                                       fg_color=T.BG3, hover_color="#1e3820",
+                                       text_color=T.ACC2, font=("Courier", 9),
+                                       corner_radius=3, command=self._toggle_auto)
+        self._auto_btn.pack(side="right", padx=4, pady=7)
         # Zoom buttons
         ctk.CTkButton(tb, text="FIT", width=36, height=26,
                       fg_color=T.BG2, hover_color=T.BG3,
@@ -836,6 +944,9 @@ class DrawModeWindow(ctk.CTkToplevel):
             return
         if ix2 < ix1: ix1, ix2 = ix2, ix1
         if iy2 < iy1: iy1, iy2 = iy2, iy1
+        if self._mode == "auto":
+            self._auto_propose(ix1, iy1, ix2, iy2)
+            return
         cid = self._sel_cid.get()
         self.label_entries.append([cid, (ix1+ix2)/2/iw, (iy1+iy2)/2/ih,
                                     (ix2-ix1)/iw, (iy2-iy1)/ih])
@@ -844,6 +955,30 @@ class DrawModeWindow(ctk.CTkToplevel):
         self._render()
 
     # ── Poligon modu ──────────────────────────────────────────────────────────
+
+    def _toggle_auto(self):
+        if self._mode == "auto":
+            self._mode = "bbox"
+            self._auto_btn.configure(text="◎ OTO")
+            self._st_var.set("BBOX modu: sürükleyerek kutu çiz.")
+        else:
+            self._mode = "auto"
+            self._auto_btn.configure(text="◎ OTO ✓")
+            self._st_var.set("OTO: nesnenin etrafına kutu çiz, poligon önerilsin.")
+
+    def _auto_propose(self, ix1, iy1, ix2, iy2):
+        rgb = np.array(self.pil_image.convert("RGB"))
+        bgr = np.ascontiguousarray(rgb[:, :, ::-1])
+        pts = grabcut_polygon(bgr, (int(ix1), int(iy1), int(ix2 - ix1), int(iy2 - iy1)))
+        if not pts:
+            self._st_var.set("Nesne bulunamadı. Kutuyu nesneye daha sıkı çizip tekrar dene.")
+            return
+        self._poly_pts = pts
+        self._mode = "poly"
+        self._mode_btn.configure(text="⬠ POLİGON")
+        self._auto_btn.configure(text="◎ OTO")
+        self._draw_poly_preview()
+        self._st_var.set(f"Öneri hazır ({len(pts)} köşe). ENTER: onayla  |  BACKSPACE: köşe geri al  |  ESC: iptal")
 
     def _toggle_mode(self):
         self._poly_pts = []
@@ -1126,7 +1261,7 @@ class LogManager:
 
 # ── Main Application ──────────────────────────────────────────────────────────
 
-class LabelForgeApp(ctk.CTk):
+class LabelForgeApp(VertexEditMixin, ctk.CTk):
 
     def __init__(self):
         super().__init__()
@@ -1155,6 +1290,9 @@ class LabelForgeApp(ctk.CTk):
         self._session_selected = ""
         self._orig_tk = None
         self._ann_tk  = None
+        self._ann_geom = (0, 0, 1, 1)
+        self._v_drag = None
+        self._v_drag_active = False
         self._log_open = False
 
         self._undo_stack: list[list] = []
@@ -1366,6 +1504,9 @@ class LabelForgeApp(ctk.CTk):
         else:
             self.ann_canvas = cv
             cv.bind("<Configure>", lambda e: self._refresh_images())
+            cv.bind("<ButtonPress-1>", self._ann_press)
+            cv.bind("<B1-Motion>", self._ann_motion)
+            cv.bind("<ButtonRelease-1>", self._ann_release)
         return frame
 
     # ── Right Panel ───────────────────────────────────────────────────────────
@@ -1678,6 +1819,79 @@ class LabelForgeApp(ctk.CTk):
             except Exception:
                 pass
 
+    @property
+    def app(self):
+        return self   # VertexEditMixin ortak arayüzü için
+
+    # ── Köşe düzenleme adaptörü (ana Annotated paneli) ───────────────────────
+
+    def _v_size(self):
+        return self._orig_pil.size
+
+    def _v_selection(self):
+        return self.selected_indices
+
+    def _v_to_screen(self, nx, ny):
+        x0, y0, nw, nh = self._ann_geom
+        return x0 + nx * nw, y0 + ny * nh
+
+    def _v_to_norm(self, sx, sy):
+        x0, y0, nw, nh = self._ann_geom
+        return (sx - x0) / nw, (sy - y0) / nh
+
+    def _v_redraw(self):
+        self._refresh_images()
+
+    def _v_after_edit(self):
+        self._populate_label_entries()
+        self._refresh_images()
+
+    def get_edges(self):
+        if self._orig_pil is None:
+            return None
+        key = getattr(self, "current_img_path", "")
+        if getattr(self, "_edge_key", None) != key or getattr(self, "_edges", None) is None:
+            bgr = np.ascontiguousarray(np.array(self._orig_pil.convert("RGB"))[:, :, ::-1])
+            self._edges = edge_map(bgr)
+            self._edge_key = key
+        return self._edges
+
+    def _ann_hit(self, sx, sy):
+        nx, ny = self._v_to_norm(sx, sy)
+        for idx in reversed(range(len(self.label_entries))):
+            e = self.label_entries[idx]
+            if len(e) >= 6 and e[5]:
+                if point_in_polygon(flat_to_pairs(e[5]), nx, ny):
+                    return idx
+            elif abs(nx - e[1]) <= e[3] / 2 and abs(ny - e[2]) <= e[4] / 2:
+                return idx
+        return None
+
+    def _ann_press(self, e):
+        if self._v_try_start(e.x, e.y):
+            self._v_drag_active = True
+            return
+        idx = self._ann_hit(e.x, e.y)
+        if idx is not None:
+            self._click_entry(idx, e)
+
+    def _ann_motion(self, e):
+        if getattr(self, "_v_drag_active", False):
+            self._v_move(e.x, e.y)
+
+    def _ann_release(self, e):
+        if getattr(self, "_v_drag_active", False):
+            self._v_drag_active = False
+            self._v_end()
+
+    def _draw_handles_pil(self, img, idx):
+        d = ImageDraw.Draw(img)
+        W, H = img.size
+        r = max(4, int(min(W, H) * 0.006))
+        for x, y in flat_to_pairs(self.label_entries[idx][5]):
+            d.rectangle([x * W - r, y * H - r, x * W + r, y * H + r], fill="#ffd34d", outline="#000000")
+        return img
+
     def _put_on_canvas(self, canvas: tk.Canvas, pil_img, attr: str):
         cw, ch = canvas.winfo_width(), canvas.winfo_height()
         if cw < 10:
@@ -1689,6 +1903,9 @@ class LabelForgeApp(ctk.CTk):
         resized = fit_pil(pil_img, cw, ch)
         tk_img  = ImageTk.PhotoImage(resized)
         setattr(self, attr, tk_img)
+        if attr == "_ann_tk":
+            nw, nh = resized.size
+            self._ann_geom = (cw // 2 - nw // 2, ch // 2 - nh // 2, nw, nh)
         canvas.delete("all")
         canvas.create_image(cw // 2, ch // 2, anchor="center", image=tk_img)
 
@@ -1696,6 +1913,9 @@ class LabelForgeApp(ctk.CTk):
         self._put_on_canvas(self.orig_canvas, self._orig_pil, "_orig_tk")
         ann = draw_boxes(self._orig_pil, self.label_entries,
                          self.class_names, self.selected_indices) if self._orig_pil else None
+        sp = self._v_selected_poly() if ann is not None else None
+        if sp is not None:
+            ann = self._draw_handles_pil(ann, sp)
         self._put_on_canvas(self.ann_canvas, ann, "_ann_tk")
 
     # ── Label Entries ─────────────────────────────────────────────────────────
