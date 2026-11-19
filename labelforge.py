@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 import customtkinter as ctk
 from PIL import Image, ImageTk, ImageDraw
+from skew import apply_h, square_polygon, warp_image
 from typing import Optional
 
 ctk.set_appearance_mode("Dark")
@@ -546,6 +547,14 @@ class DrawModeWindow(ctk.CTkToplevel):
         self._mode     = "bbox"   # "bbox" | "poly"
         self._poly_pts = []       # bekleyen poligon köşeleri (görüntü piksel koordinatı)
         self._cursor   = None     # poligon önizlemesi için fare konumu (ekran)
+        # Eğik mod: 4 köşe → perspektif düzeltme → poligon → düzeltilmiş görüntü kaydı
+        self._skew = False
+        self._skew_stage = None   # None | "quad" | "poly"
+        self._skew_quad = []      # tepsi köşeleri (görüntü piksel koordinatı): TL, TR, BR, BL
+        self._skew_warp = None    # (düzeltilmiş PIL görüntü, H_ileri, (W, H))
+        self._skew_out_path = None
+        self._skew_lbl_path = None
+        self._skew_count = 0
 
         self._build()
         self.after(130, self._render)
@@ -595,6 +604,11 @@ class DrawModeWindow(ctk.CTkToplevel):
                       text_color=T.TX1, font=("Courier", 9),
                       corner_radius=3, command=self._undo_last
                       ).pack(side="right", padx=4, pady=7)
+        self._skew_btn = ctk.CTkButton(tb, text="◇ EĞİK", width=84, height=28,
+                      fg_color=T.BG2, hover_color=T.BG3,
+                      text_color=T.ACC2, font=("Courier", 9, "bold"),
+                      corner_radius=3, command=self._skew_toggle)
+        self._skew_btn.pack(side="right", padx=4, pady=7)
         self._mode_btn = ctk.CTkButton(tb, text="▭ BBOX", width=96, height=28,
                       fg_color=T.BG2, hover_color=T.BG3,
                       text_color=T.ACC2, font=("Courier", 9, "bold"),
@@ -720,6 +734,7 @@ class DrawModeWindow(ctk.CTkToplevel):
         self.cv.delete("all")
         self.cv.create_image(int(self._ox), int(self._oy), anchor="nw", image=self._tk)
         self._draw_poly_preview()
+        self._draw_skew_quad()
 
     def _scroll(self, event):
         if event.delta == 0:
@@ -780,6 +795,9 @@ class DrawModeWindow(ctk.CTkToplevel):
         self._pan_pos = None
 
     def _press(self, event):
+        if self._skew and self._skew_stage == "quad":
+            self._skew_add_corner(event)
+            return
         if self._mode == "poly":
             self._poly_click(event)
             return
@@ -860,6 +878,9 @@ class DrawModeWindow(ctk.CTkToplevel):
         if len(self._poly_pts) < 3:
             self._st_var.set("Poligon için en az 3 köşe gerekli.")
             return
+        if self._skew and self._skew_stage == "poly":
+            self._finish_skew()
+            return
         iw, ih = self.pil_image.size
         norm = []
         for x, y in self._poly_pts:
@@ -882,11 +903,137 @@ class DrawModeWindow(ctk.CTkToplevel):
             self._draw_poly_preview()
 
     def _poly_cancel(self):
+        if self._skew and self._skew_stage == "quad" and self._skew_quad:
+            self._skew_quad = []
+            self._st_var.set("Eğik köşeler sıfırlandı. Baştan tıkla.")
+            self._render()
+            return
         if self._poly_pts:
             self._poly_pts = []
             self._cursor = None
             self._st_var.set("Bekleyen poligon iptal edildi.")
             self._draw_poly_preview()
+
+    # ── Eğik mod ──────────────────────────────────────────────────────────────
+
+    _SKEW_CORNERS = ["sol üst", "sağ üst", "sağ alt", "sol alt"]
+
+    def _skew_toggle(self):
+        self._skew = not self._skew
+        self._skew_quad = []
+        self._skew_warp = None
+        self._skew_out_path = None
+        self._skew_lbl_path = None
+        self._skew_count = 0
+        self._poly_pts = []
+        self._cursor = None
+        if self._skew:
+            self._skew_stage = "quad"
+            if self._mode != "poly":
+                self._toggle_mode()
+            self._skew_btn.configure(text="◇ EĞİK ✓", text_color=T.ACC)
+            self._st_var.set(f"EĞİK: tepsinin 4 köşesini sırayla tıkla ({', '.join(self._SKEW_CORNERS)})")
+        else:
+            self._skew_stage = None
+            self._skew_btn.configure(text="◇ EĞİK", text_color=T.ACC2)
+            self._st_var.set("Eğik mod kapatıldı.")
+        self._render()
+
+    def _skew_add_corner(self, event):
+        self._skew_quad.append(self._screen_to_img(event.x, event.y))
+        n = len(self._skew_quad)
+        if n < 4:
+            self._st_var.set(f"EĞİK: {n}/4 köşe, sıradaki: {self._SKEW_CORNERS[n]}  |  ESC = sıfırla")
+            self._render()
+            return
+        try:
+            self._skew_warp = warp_image(self.pil_image, self._skew_quad)
+        except ValueError as e:
+            self._skew_quad = []
+            self._st_var.set(f"Köşeler geçersiz ({e}). Baştan tıkla.")
+            self._render()
+            return
+        self._skew_stage = "poly"
+        self._st_var.set("Düzeltme hazır. Yemeğin poligonunu çiz, ENTER ile onayla (düzeltilmiş görüntü kaydedilir)")
+        self._render()
+
+    def _draw_skew_quad(self):
+        self.cv.delete("skew")
+        if not self._skew or not self._skew_quad:
+            return
+        pts = [(x * self._scale + self._ox, y * self._scale + self._oy) for x, y in self._skew_quad]
+        closed = pts + [pts[0]] if len(pts) == 4 else pts
+        if len(closed) >= 2:
+            flat = [c for p in closed for c in p]
+            self.cv.create_line(*flat, fill="#ffcc00", width=2, tags="skew")
+        for px, py in pts:
+            self.cv.create_rectangle(px - 4, py - 4, px + 4, py + 4,
+                                     outline="#ffcc00", fill="#ffcc00", tags="skew")
+
+    def _finish_skew(self):
+        """Onaylanan poligon ile tepsiyi düzeltir, `_duzeltilmis` kopyasını yazar ve
+        o kopyayı etiketlemek üzere açar. Kaynak fotoğrafın etiketleri taşınmaz."""
+        app = self.app
+        if self._skew_warp is None:
+            self._st_var.set("Önce 4 tepsi köşesini işaretle.")
+            return
+        img_dir = app.img_dir_var.get()
+        lbl_dir = app.lbl_dir_var.get()
+        if not img_dir or not lbl_dir or not app.current_img_path:
+            self._st_var.set("Görsel veya label klasörü eksik; düzeltilmiş görüntü kaydedilemedi.")
+            return
+
+        src = os.path.basename(app.current_img_path)
+        base, ext = os.path.splitext(src)
+        ext = ext or ".jpg"
+        stem = base + "_duzeltilmis"
+        out_img = os.path.join(img_dir, stem + ext)
+        out_lbl = os.path.join(lbl_dir, stem + ".txt")
+        if os.path.exists(out_img) or os.path.exists(out_lbl):
+            messagebox.showwarning("Uyarı",
+                                   f"Bu fotoğrafın düzeltilmiş kopyası zaten var:\n{os.path.basename(out_img)}",
+                                   parent=self)
+            return
+
+        warped, fwd, (W, H) = self._skew_warp
+        rect_pts = [apply_h(fwd, p) for p in self._poly_pts]
+        sq, changed = square_polygon(rect_pts)
+        norm = []
+        for x, y in sq:
+            norm += [min(max(x / W, 0.0), 1.0), min(max(y / H, 0.0), 1.0)]
+        cid = self._sel_cid.get()
+        name = self.class_names.get(cid, f"#{cid}")
+        note = "dik açıya oturtulacak" if changed else "dik açı uygulanamadı, poligon olduğu gibi kalacak"
+        ok = messagebox.askyesno(
+            "Onay",
+            f"Düzeltilmiş kopya oluşturulsun mu?\n\n"
+            f"Dosya: {os.path.basename(out_img)}\n"
+            f"İlk etiket: [{cid}] {name} ({note})\n\n"
+            f"Kaynak fotoğraf değişmez. Kopya açılıp geri kalan etiketler orada yapılır.",
+            parent=self)
+        if not ok:
+            self._poly_pts = []
+            self._cursor = None
+            self._st_var.set("İptal edildi. Poligonu yeniden çizebilirsin.")
+            self._render()
+            return
+
+        if ext.lower() in (".jpg", ".jpeg"):
+            warped = warped.convert("RGB")
+        os.makedirs(lbl_dir, exist_ok=True)
+        warped.save(out_img, quality=95)
+        xs, ys = norm[0::2], norm[1::2]
+        x1, x2, y1, y2 = min(xs), max(xs), min(ys), max(ys)
+        with open(out_lbl, "w", encoding="utf-8") as f:
+            f.write(format_label_line([cid, (x1 + x2) / 2, (y1 + y2) / 2,
+                                       x2 - x1, y2 - y1, norm]) + "\n")
+
+        app.scan_directories()
+        self.destroy()
+        if os.path.basename(out_img) in app.image_files:
+            app._select_image(app.image_files.index(os.path.basename(out_img)))
+        app.log.log(f"Düzeltilmiş kopya oluşturuldu: {os.path.basename(out_img)}", "action")
+
 
     def _on_motion(self, event):
         if self._mode == "poly" and self._poly_pts:
