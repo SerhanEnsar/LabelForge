@@ -759,8 +759,8 @@ class DrawModeWindow(ctk.CTkToplevel):
         self.cv.bind("<Configure>",       lambda e: self._schedule_render())
         self.cv.bind("<Motion>",          self._on_motion)
         # Poligon kısayolları
-        self.bind("<Return>",    lambda e: self._poly_close() if self._mode == "poly" else None)
-        self.bind("<BackSpace>", lambda e: self._poly_back() if self._mode == "poly" else None)
+        self.bind("<Return>",    lambda e: self._poly_close() if self._mode in ("poly", "auto") else None)
+        self.bind("<BackSpace>", lambda e: self._poly_back() if self._mode in ("poly", "auto") else None)
         self.bind("<Escape>",    lambda e: self._poly_cancel())
         # Arrow key pan & keyboard zoom
         self.bind("<Left>",  lambda e: self._pan_key(-24, 0))
