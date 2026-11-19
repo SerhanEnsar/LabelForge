@@ -2,12 +2,14 @@
 """
 LabelForge — YOLO Dataset Editor  (Tactical Edition)
 """
+import copy
 import os, json, subprocess, platform, datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 import customtkinter as ctk
 from PIL import Image, ImageTk, ImageDraw
 from skew import apply_h, square_polygon, warp_image
+from polyfix import self_intersects, repair_polygon
 from typing import Optional
 
 ctk.set_appearance_mode("Dark")
@@ -532,7 +534,7 @@ class DrawModeWindow(ctk.CTkToplevel):
         self.grab_set()
 
         self.pil_image    = app._orig_pil.copy()
-        self.label_entries = [list(e) for e in app.label_entries]
+        self.label_entries = [copy.deepcopy(e) for e in app.label_entries]
         self.class_names  = dict(app.class_names)
 
         self._scale  = 1.0
@@ -881,9 +883,18 @@ class DrawModeWindow(ctk.CTkToplevel):
         if self._skew and self._skew_stage == "poly":
             self._finish_skew()
             return
+        pts = list(self._poly_pts)
+        note = ""
+        if self_intersects(pts):
+            fixed = repair_polygon(pts)
+            if fixed is None:
+                self._st_var.set("Poligon kendini kesiyor. Geri al (BACKSPACE) ile köşeleri düzgün sırayla yeniden çiz.")
+                return
+            pts = fixed
+            note = " (kendini kesen köşeler sıralandı)"
         iw, ih = self.pil_image.size
         norm = []
-        for x, y in self._poly_pts:
+        for x, y in pts:
             norm += [x / iw, y / ih]
         xs, ys = norm[0::2], norm[1::2]
         x1, x2, y1, y2 = min(xs), max(xs), min(ys), max(ys)
@@ -893,7 +904,7 @@ class DrawModeWindow(ctk.CTkToplevel):
         self._poly_pts = []
         self._cursor = None
         name = self.class_names.get(cid, f"#{cid}")
-        self._st_var.set(f"Poligon eklendi → [{cid}] {name}  //  Toplam: {len(self.label_entries)}")
+        self._st_var.set(f"Poligon eklendi → [{cid}] {name}{note}  //  Toplam: {len(self.label_entries)}")
         self._render()
 
     def _poly_back(self):
@@ -1873,7 +1884,7 @@ class LabelForgeApp(ctk.CTk):
     # ── Undo / Redo ───────────────────────────────────────────────────────────
 
     def _push_undo(self):
-        self._undo_stack.append([list(e) for e in self.label_entries])
+        self._undo_stack.append([copy.deepcopy(e) for e in self.label_entries])
         self._redo_stack.clear()
         if len(self._undo_stack) > 100:
             self._undo_stack.pop(0)
@@ -1883,7 +1894,7 @@ class LabelForgeApp(ctk.CTk):
             if hasattr(self, "log"):
                 self.log.log("Geri alınacak işlem yok.", "warning")
             return
-        self._redo_stack.append([list(e) for e in self.label_entries])
+        self._redo_stack.append([copy.deepcopy(e) for e in self.label_entries])
         self.label_entries = self._undo_stack.pop()
         self.selected_indices.clear()
         self._commit_labels()
@@ -1896,7 +1907,7 @@ class LabelForgeApp(ctk.CTk):
             if hasattr(self, "log"):
                 self.log.log("Yinelenecek işlem yok.", "warning")
             return
-        self._undo_stack.append([list(e) for e in self.label_entries])
+        self._undo_stack.append([copy.deepcopy(e) for e in self.label_entries])
         self.label_entries = self._redo_stack.pop()
         self.selected_indices.clear()
         self._commit_labels()
