@@ -46,3 +46,30 @@ def test_grabcut_finds_bright_disc():
     ys = [p[1] for p in pts]
     assert 45 <= min(xs) <= 55 and 145 <= max(xs) <= 155
     assert 45 <= min(ys) <= 55 and 145 <= max(ys) <= 155
+
+
+def test_click_grabcut_extracts_clicked_object():
+    from polyedit import click_grabcut
+    img = np.full((240, 240, 3), 70, np.uint8)
+    cv2.circle(img, (120, 120), 60, (235, 235, 235), -1)
+    pts = click_grabcut(img, fg_pts=[(120, 120)], bg_pts=[(5, 5)])
+    assert pts is not None
+    xs = [p[0] for p in pts]
+    assert 50 <= min(xs) <= 70 and 170 <= max(xs) <= 190
+
+
+def test_sam_is_unavailable_without_checkpoint():
+    from polyedit import load_sam
+    assert load_sam("/nonexistent/sam.pth") is None
+
+
+def test_click_grabcut_iou_on_large_disc():
+    from polyedit import click_grabcut
+    img = np.full((400, 600, 3), 60, np.uint8)
+    cv2.circle(img, (300, 200), 120, (230, 230, 230), -1)
+    gt = np.zeros((400, 600), np.uint8)
+    cv2.circle(gt, (300, 200), 120, 255, -1)
+    pts = click_grabcut(img, [(300, 200)], [(5, 5)])
+    m = np.zeros_like(gt)
+    cv2.fillPoly(m, [np.array(pts, np.int32)], 255)
+    assert (m & gt).sum() / (m | gt).sum() > 0.9

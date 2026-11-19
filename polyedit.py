@@ -5,6 +5,8 @@
 - GrabCut ile kutudan otomatik poligon önerisi
 Koordinatlar: normalize (0-1) ya da görüntü pikseli (px) olarak belirtilir.
 """
+import os
+
 import cv2
 import numpy as np
 
@@ -98,3 +100,88 @@ def grabcut_polygon(img_bgr: np.ndarray, rect, max_side: int = 700, epsilon_frac
     if len(approx) < 3:
         return None
     return [(float(px) / scale, float(py) / scale) for px, py in approx]
+
+
+# ── Tıklama tabanlı ayıklama ─────────────────────────────────────────────────
+
+def mask_to_polygon(mask: np.ndarray, prefer_pt=None, epsilon_frac: float = 0.004):
+    """İkili maskenin poligonunu (piksel) döndürür. prefer_pt verilirse onu içeren kontur seçilir."""
+    cnts, _ = cv2.findContours((mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not cnts:
+        return None
+    c = None
+    if prefer_pt is not None:
+        inside = [k for k in cnts if cv2.pointPolygonTest(k, (float(prefer_pt[0]), float(prefer_pt[1])), False) >= 0]
+        if inside:
+            c = max(inside, key=cv2.contourArea)
+    if c is None:
+        c = max(cnts, key=cv2.contourArea)
+    if cv2.contourArea(c) < 20:
+        return None
+    approx = cv2.approxPolyDP(c, epsilon_frac * cv2.arcLength(c, True), True).reshape(-1, 2)
+    if len(approx) < 3:
+        return None
+    return [(float(x), float(y)) for x, y in approx]
+
+
+def click_grabcut(img_bgr: np.ndarray, fg_pts, bg_pts, max_side: int = 700):
+    """Tıklanan nesneyi ayırır. fg_pts: nesne üstüne tıklamalar, bg_pts: arka plan tıklamaları (piksel).
+    İlk fg noktasının çevresinde otomatik bir çalışma kutusu kurulur. Döndürür: piksel poligonu ya da None."""
+    H, W = img_bgr.shape[:2]
+    scale = min(1.0, max_side / max(H, W))
+    sh, sw = max(1, int(H * scale)), max(1, int(W * scale))
+    small = cv2.resize(img_bgr, (sw, sh), interpolation=cv2.INTER_AREA)
+    fgs = [(int(x * scale), int(y * scale)) for x, y in fg_pts]
+    bgs = [(int(x * scale), int(y * scale)) for x, y in bg_pts]
+    fx, fy = fgs[0]
+    half = max(30, int(0.45 * min(sh, sw)))   # çalışma kutusu nesneyi içermeli
+    rx, ry = max(0, fx - half), max(0, fy - half)
+    rw, rh = min(sw, fx + half) - rx, min(sh, fy + half) - ry
+
+    mask = np.full((sh, sw), cv2.GC_BGD, np.uint8)
+    mask[ry:ry + rh, rx:rx + rw] = cv2.GC_PR_BGD
+    # Tıklamanın çevresi olası nesne: GrabCut renk modelini buradan öğrenir
+    cv2.circle(mask, (fx, fy), max(6, half // 2), cv2.GC_PR_FGD, -1)
+    for x, y in fgs:
+        cv2.circle(mask, (x, y), 3, cv2.GC_FGD, -1)
+    for x, y in bgs:
+        cv2.circle(mask, (x, y), 3, cv2.GC_BGD, -1)
+    bgd = np.zeros((1, 65), np.float64)
+    fgd = np.zeros((1, 65), np.float64)
+    cv2.grabCut(small, mask, None, bgd, fgd, 5, cv2.GC_INIT_WITH_MASK)
+    fg = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
+    pts = mask_to_polygon(fg, prefer_pt=(fx, fy))
+    if pts is None:
+        return None
+    return [(x / scale, y / scale) for x, y in pts]
+
+
+# ── SAM (isteğe bağlı) ────────────────────────────────────────────────────────
+
+def load_sam(checkpoint: str, model_type: str = "vit_b"):
+    """segment_anything ve model dosyası varsa SamPredictor döndürür; yoksa None."""
+    try:
+        from segment_anything import SamPredictor, sam_model_registry
+    except ImportError:
+        return None
+    if not checkpoint or not os.path.isfile(checkpoint):
+        return None
+    sam = sam_model_registry[model_type](checkpoint=checkpoint)
+    return SamPredictor(sam)
+
+
+_sam_image_key = {"key": None}
+
+
+def sam_polygon(predictor, img_rgb: np.ndarray, key: str, fg_pts, bg_pts):
+    """SAM ile tıklama istemlerinden maske ve poligon. Aynı görüntü için görüntü kodlaması önbelleğe alınır."""
+    if predictor is None or not fg_pts:
+        return None
+    if _sam_image_key["key"] != key:
+        predictor.set_image(img_rgb)
+        _sam_image_key["key"] = key
+    coords = np.array(list(fg_pts) + list(bg_pts), dtype=np.float32)
+    labels = np.array([1] * len(fg_pts) + [0] * len(bg_pts), dtype=np.int32)
+    masks, _, _ = predictor.predict(point_coords=coords, point_labels=labels, multimask_output=False)
+    mask = (masks[0].astype(np.uint8)) * 255
+    return mask_to_polygon(mask, prefer_pt=fg_pts[0])

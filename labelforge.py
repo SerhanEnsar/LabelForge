@@ -10,8 +10,9 @@ import customtkinter as ctk
 from PIL import Image, ImageTk, ImageDraw
 from skew import apply_h, square_polygon, warp_image
 from polyfix import self_intersects, repair_polygon
-from polyedit import (edge_map, flat_to_pairs, grabcut_polygon, nearest_vertex,
-                      point_in_polygon, refresh_bbox, snap_to_edge)
+from polyedit import (click_grabcut, edge_map, flat_to_pairs, grabcut_polygon, load_sam,
+                      nearest_vertex, point_in_polygon, refresh_bbox, sam_polygon, snap_to_edge)
+SAM_CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "sam_vit_b_01ec64.pth")
 import numpy as np
 import cv2
 from typing import Optional
@@ -748,7 +749,7 @@ class DrawModeWindow(ctk.CTkToplevel):
         self.cv.bind("<B1-Motion>",       self._drag)
         self.cv.bind("<ButtonRelease-1>", self._release)
         # Right-click pan
-        self.cv.bind("<ButtonPress-3>",   self._pan_press)
+        self.cv.bind("<ButtonPress-3>",   self._right_press)
         self.cv.bind("<B3-Motion>",       self._pan_move)
         self.cv.bind("<ButtonRelease-3>", self._pan_end)
         self.cv.bind("<ButtonPress-2>",   self._pan_press)
@@ -933,6 +934,10 @@ class DrawModeWindow(ctk.CTkToplevel):
         if self._rect_id:
             self.cv.delete(self._rect_id)
             self._rect_id = None
+        if self._mode == "auto" and abs(event.x - self._sx) < 6 and abs(event.y - self._sy) < 6:
+            ix, iy = self._screen_to_img(event.x, event.y)
+            self._auto_click(ix, iy, fg=True)
+            return
         iw, ih = self.pil_image.size
         def cl(v, lo, hi): return max(lo, min(hi, v))
         ix1 = cl((self._sx    - self._ox) / self._scale, 0, iw)
@@ -957,6 +962,9 @@ class DrawModeWindow(ctk.CTkToplevel):
     # ── Poligon modu ──────────────────────────────────────────────────────────
 
     def _toggle_auto(self):
+        self._auto_fg, self._auto_bg = [], []
+        self._poly_pts = []
+        self._draw_poly_preview()
         if self._mode == "auto":
             self._mode = "bbox"
             self._auto_btn.configure(text="◎ OTO")
@@ -966,6 +974,42 @@ class DrawModeWindow(ctk.CTkToplevel):
             self._auto_btn.configure(text="◎ OTO ✓")
             self._st_var.set("OTO: nesnenin etrafına kutu çiz, poligon önerilsin.")
 
+    def _right_press(self, event):
+        if self._mode == "auto":
+            ix, iy = self._screen_to_img(event.x, event.y)
+            self._auto_click(ix, iy, fg=False)
+            return
+        self._pan_press(event)
+
+    def _auto_click(self, ix, iy, fg: bool):
+        fgl = getattr(self, "_auto_fg", [])
+        bgl = getattr(self, "_auto_bg", [])
+        (fgl if fg else bgl).append((float(ix), float(iy)))
+        self._auto_fg, self._auto_bg = fgl, bgl
+        if not fgl:
+            self._st_var.set("Önce nesnenin üstüne sol tıkla. Sağ tık: arka plan işareti.")
+            return
+        rgb = np.array(self.pil_image.convert("RGB"))
+        bgr = np.ascontiguousarray(rgb[:, :, ::-1])
+        engine = "OpenCV"
+        pts = None
+        predictor = self.app.get_sam()
+        if predictor is not None:
+            pts = sam_polygon(predictor, rgb, self.app.current_img_path, fgl, bgl)
+            engine = "SAM"
+        if pts is None:
+            pts = click_grabcut(bgr, fgl, bgl)
+        if not pts:
+            self._poly_pts = []
+            self._draw_poly_preview()
+            self._st_var.set("Nesne ayrılamadı. Nesnenin içine biraz daha tıkla, arka plana sağ tık yap.")
+            return
+        self._poly_pts = pts
+        self._mode = "auto"
+        self._draw_poly_preview()
+        note = "" if engine == "SAM" else " (SAM yok: OpenCV)"
+        self._st_var.set(f"{engine} önerisi ({len(pts)} köşe){note}. Sol tık: nesne, sağ tık: arka plan, ENTER: onayla")
+
     def _auto_propose(self, ix1, iy1, ix2, iy2):
         rgb = np.array(self.pil_image.convert("RGB"))
         bgr = np.ascontiguousarray(rgb[:, :, ::-1])
@@ -974,11 +1018,10 @@ class DrawModeWindow(ctk.CTkToplevel):
             self._st_var.set("Nesne bulunamadı. Kutuyu nesneye daha sıkı çizip tekrar dene.")
             return
         self._poly_pts = pts
-        self._mode = "poly"
-        self._mode_btn.configure(text="⬠ POLİGON")
-        self._auto_btn.configure(text="◎ OTO")
+        self._mode = "auto"
+        self._auto_btn.configure(text="◎ OTO ✓")
         self._draw_poly_preview()
-        self._st_var.set(f"Öneri hazır ({len(pts)} köşe). ENTER: onayla  |  BACKSPACE: köşe geri al  |  ESC: iptal")
+        self._st_var.set(f"Kutu önerisi ({len(pts)} köşe). Sol tık: nesne ekle, sağ tık: arka plan, ENTER: onayla")
 
     def _toggle_mode(self):
         self._poly_pts = []
@@ -1038,6 +1081,7 @@ class DrawModeWindow(ctk.CTkToplevel):
                                    x2 - x1, y2 - y1, norm])
         self._poly_pts = []
         self._cursor = None
+        self._auto_fg, self._auto_bg = [], []
         name = self.class_names.get(cid, f"#{cid}")
         self._st_var.set(f"Poligon eklendi → [{cid}] {name}{note}  //  Toplam: {len(self.label_entries)}")
         self._render()
@@ -1188,7 +1232,7 @@ class DrawModeWindow(ctk.CTkToplevel):
 
     def _draw_poly_preview(self):
         self.cv.delete("preview")
-        if self._mode != "poly" or not self._poly_pts:
+        if self._mode not in ("poly", "auto") or not self._poly_pts:
             return
         color = get_color(self._sel_cid.get())
         pts = [(x * self._scale + self._ox, y * self._scale + self._oy)
@@ -1822,6 +1866,17 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
     @property
     def app(self):
         return self   # VertexEditMixin ortak arayüzü için
+
+    def get_sam(self):
+        """SAM tahmincisi. Kurulu değilse ya da model dosyası yoksa None (OpenCV'ye düşülür)."""
+        if not getattr(self, "_sam_tried", False):
+            self._sam_tried = True
+            try:
+                self._sam = load_sam(SAM_CHECKPOINT)
+            except Exception as e:
+                self._sam = None
+                self.log.log(f"SAM yüklenemedi: {e}", "warning")
+        return getattr(self, "_sam", None)
 
     # ── Köşe düzenleme adaptörü (ana Annotated paneli) ───────────────────────
 
