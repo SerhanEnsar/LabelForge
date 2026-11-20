@@ -7,7 +7,7 @@ import os, json, subprocess, platform, datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 import customtkinter as ctk
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageTk, ImageDraw, ImageOps
 from skew import apply_h, square_polygon, warp_image
 from polyfix import self_intersects, repair_polygon
 from polyedit import (click_grabcut, edge_map, flat_to_pairs, grabcut_polygon, load_sam,
@@ -1845,7 +1845,7 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
 
     def _load_image(self, path: str):
         try:
-            self._orig_pil = Image.open(path).convert("RGB")
+            self._orig_pil = ImageOps.exif_transpose(Image.open(path)).convert("RGB")  # EXIF yönü uygulanır (cv2 ile aynı kare)
         except Exception:
             self._orig_pil = None
 
