@@ -56,24 +56,20 @@ To run the project on your computer, the following Python libraries must be inst
    cd LabelForge
    ```
 
-2. Install the required libraries:
+2. Install the requirements (optional: the app installs missing packages on its own at startup):
 
    ```bash
-   pip install customtkinter Pillow opencv-python numpy
+   pip install -r requirements.txt
    ```
 
-   Optional, for SAM-based auto segmentation (the OTO button uses OpenCV GrabCut without it):
-
-   ```bash
-   pip install segment-anything torch
-   ```
+   Python packages that are missing are installed automatically when the app starts. SAM packages (`segment-anything`, `torch`) are installed in the background, with progress shown in a window. If installation fails, the OTO button falls back to OpenCV GrabCut.
 
 3. Launch the application:
    ```bash
    python labelforge.py
    ```
 
-   On startup, if `segment-anything` is installed, the SAM model (`models/sam_vit_b_01ec64.pth`, about 375 MB) is downloaded automatically with a progress bar when it is missing. If it is already there, it is loaded directly.
+   On startup, the SAM model (`models/sam_vit_b_01ec64.pth`, about 375 MB) is downloaded with a progress bar when it is missing. If it is already there, it is loaded directly.
 
 ---
 

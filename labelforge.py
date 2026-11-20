@@ -2,6 +2,8 @@
 """
 LabelForge — YOLO Dataset Editor  (Tactical Edition)
 """
+from bootstrap import ensure_required
+ensure_required()  # zorunlu paketler eksikse önce kurulur
 import copy
 import os, json, subprocess, platform, datetime
 import tkinter as tk
@@ -10,7 +12,8 @@ import customtkinter as ctk
 from PIL import Image, ImageTk, ImageDraw, ImageOps
 from skew import apply_h, square_polygon, warp_image
 from polyfix import self_intersects, repair_polygon
-from polyedit import (SAM_URL, download_file, sam_available, click_grabcut, edge_map, flat_to_pairs, grabcut_polygon, load_sam,
+import bootstrap
+from polyedit import (SAM_URL, download_file, click_grabcut, edge_map, flat_to_pairs, grabcut_polygon, load_sam,
                       nearest_vertex, point_in_polygon, refresh_bbox, sam_polygon, snap_to_edge)
 SAM_CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "sam_vit_b_01ec64.pth")
 import numpy as np
@@ -1873,20 +1876,25 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
         return getattr(self, "_sam", None)
 
     def _start_sam_setup(self):
-        """Açılışta SAM'i arka planda hazırlar: model yoksa indirir (ilerleme çubuğu ile), varsa doğrudan yükler."""
+        """Açılışta SAM'i arka planda hazırlar: paketleri kurar, model yoksa indirir (ilerleme çubuğu ile), sonra yükler."""
         self._sam = None
-        self._sam_state = {"done": 0, "total": 0, "phase": "", "error": None, "finished": False}
-        if not sam_available():
-            self.after(300, lambda: self.log.log(
-                "SAM kurulu değil: 'pip install segment-anything torch' çalıştır. Otomatik seçim OpenCV ile yapılır.", "warning"))
-            return
+        self._sam_state = {"done": 0, "total": 0, "phase": "", "line": "", "error": None, "finished": False}
+        need_pip = bool(bootstrap.missing(bootstrap.SAM_PACKAGES))
         need_download = not os.path.isfile(SAM_CHECKPOINT)
-        if need_download:
+        if need_pip or need_download:
             self._sam_progress_win = self._make_sam_progress_window()
 
         def worker():
             st = self._sam_state
             try:
+                if need_pip:
+                    st["phase"] = "pip"
+                    todo = bootstrap.missing(bootstrap.SAM_PACKAGES)
+                    def on_line(line):
+                        st["line"] = line
+                    ok, last = bootstrap.pip_install(todo, on_line)
+                    if not ok:
+                        raise RuntimeError(f"paket kurulamadı ({', '.join(todo)}): {last}")
                 if need_download:
                     st["phase"] = "download"
                     def cb(done, total):
@@ -1898,6 +1906,16 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
                 st["error"] = str(e)
             st["finished"] = True
 
+        if not (need_pip or need_download):
+            st = self._sam_state
+            self._sam_state["phase"] = "load"
+            try:
+                self._sam = load_sam(SAM_CHECKPOINT)
+            except Exception as e:
+                st["error"] = str(e)
+            st["finished"] = True
+            self.after(300, self._sam_finish)
+            return
         import threading
         threading.Thread(target=worker, daemon=True).start()
         self._sam_poll()
@@ -1918,8 +1936,14 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
     def _sam_poll(self):
         st = self._sam_state
         win = getattr(self, "_sam_progress_win", None)
-        if win is not None and st["phase"] == "download":
+        if win is not None and st["phase"] == "pip":
+            self._sam_label.configure(text="SAM bileşenleri kuruluyor (torch büyük olabilir)…\n" + st["line"][:70])
+            self._sam_bar.configure(mode="indeterminate")
+            self._sam_bar.start()
+        elif win is not None and st["phase"] == "download":
             if st["total"]:
+                self._sam_bar.stop()
+                self._sam_bar.configure(mode="determinate")
                 frac = st["done"] / st["total"]
                 self._sam_bar.set(frac)
                 self._sam_label.configure(text=f"SAM modeli indiriliyor… %{int(frac * 100)} "
@@ -1935,6 +1959,11 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
         if not st["finished"]:
             self.after(150, self._sam_poll)
             return
+        self._sam_finish()
+
+    def _sam_finish(self):
+        st = self._sam_state
+        win = getattr(self, "_sam_progress_win", None)
         if win is not None:
             win.destroy()
             self._sam_progress_win = None

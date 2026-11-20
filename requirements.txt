@@ -1,0 +1,7 @@
+customtkinter
+Pillow
+opencv-python
+numpy
+# SAM (isteğe bağlı, açılışta otomatik kurulur):
+segment-anything
+torch
