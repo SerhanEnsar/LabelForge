@@ -59,13 +59,21 @@ To run the project on your computer, the following Python libraries must be inst
 2. Install the required libraries:
 
    ```bash
-   pip install customtkinter Pillow
+   pip install customtkinter Pillow opencv-python numpy
+   ```
+
+   Optional, for SAM-based auto segmentation (the OTO button uses OpenCV GrabCut without it):
+
+   ```bash
+   pip install segment-anything torch
    ```
 
 3. Launch the application:
    ```bash
    python labelforge.py
    ```
+
+   On startup, if `segment-anything` is installed, the SAM model (`models/sam_vit_b_01ec64.pth`, about 375 MB) is downloaded automatically with a progress bar when it is missing. If it is already there, it is loaded directly.
 
 ---
 

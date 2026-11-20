@@ -185,3 +185,38 @@ def sam_polygon(predictor, img_rgb: np.ndarray, key: str, fg_pts, bg_pts):
     masks, _, _ = predictor.predict(point_coords=coords, point_labels=labels, multimask_output=False)
     mask = (masks[0].astype(np.uint8)) * 255
     return mask_to_polygon(mask, prefer_pt=fg_pts[0])
+
+
+# ── SAM model indirme ─────────────────────────────────────────────────────────
+
+SAM_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+
+
+def download_file(url: str, dest: str, progress=None) -> None:
+    """url'yi dest'e indirir. progress(indirilen_bayt, toplam_bayt_ya_da_0) çağrılır.
+    Yarım kalan indirme dest'i bozmasın diye önce .part dosyasına yazılır."""
+    import urllib.request
+    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+    part = dest + ".part"
+    req = urllib.request.Request(url, headers={"User-Agent": "LabelForge"})
+    with urllib.request.urlopen(req, timeout=30) as r, open(part, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            chunk = r.read(1 << 16)
+            if not chunk:
+                break
+            f.write(chunk)
+            done += len(chunk)
+            if progress:
+                progress(done, total)
+    os.replace(part, dest)
+
+
+def sam_available() -> bool:
+    """segment_anything paketi kurulu mu?"""
+    try:
+        import segment_anything  # noqa: F401
+        return True
+    except ImportError:
+        return False

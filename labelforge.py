@@ -10,7 +10,7 @@ import customtkinter as ctk
 from PIL import Image, ImageTk, ImageDraw, ImageOps
 from skew import apply_h, square_polygon, warp_image
 from polyfix import self_intersects, repair_polygon
-from polyedit import (click_grabcut, edge_map, flat_to_pairs, grabcut_polygon, load_sam,
+from polyedit import (SAM_URL, download_file, sam_available, click_grabcut, edge_map, flat_to_pairs, grabcut_polygon, load_sam,
                       nearest_vertex, point_in_polygon, refresh_bbox, sam_polygon, snap_to_edge)
 SAM_CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "sam_vit_b_01ec64.pth")
 import numpy as np
@@ -1346,6 +1346,7 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
         self._build_ui()
         self.log = LogManager(self)
         self._bind_keys()
+        self._start_sam_setup()
 
         if self.img_dir_var.get() and os.path.isdir(self.img_dir_var.get()):
             self.after(200, self.scan_directories)
@@ -1868,15 +1869,79 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
         return self   # VertexEditMixin ortak arayüzü için
 
     def get_sam(self):
-        """SAM tahmincisi. Kurulu değilse ya da model dosyası yoksa None (OpenCV'ye düşülür)."""
-        if not getattr(self, "_sam_tried", False):
-            self._sam_tried = True
+        """Hazır SAM tahmincisi. Henüz yüklenmediyse ya da kurulu değilse None (OpenCV'ye düşülür)."""
+        return getattr(self, "_sam", None)
+
+    def _start_sam_setup(self):
+        """Açılışta SAM'i arka planda hazırlar: model yoksa indirir (ilerleme çubuğu ile), varsa doğrudan yükler."""
+        self._sam = None
+        self._sam_state = {"done": 0, "total": 0, "phase": "", "error": None, "finished": False}
+        if not sam_available():
+            self.after(300, lambda: self.log.log(
+                "SAM kurulu değil: 'pip install segment-anything torch' çalıştır. Otomatik seçim OpenCV ile yapılır.", "warning"))
+            return
+        need_download = not os.path.isfile(SAM_CHECKPOINT)
+        if need_download:
+            self._sam_progress_win = self._make_sam_progress_window()
+
+        def worker():
+            st = self._sam_state
             try:
+                if need_download:
+                    st["phase"] = "download"
+                    def cb(done, total):
+                        st["done"], st["total"] = done, total
+                    download_file(SAM_URL, SAM_CHECKPOINT, cb)
+                st["phase"] = "load"
                 self._sam = load_sam(SAM_CHECKPOINT)
             except Exception as e:
-                self._sam = None
-                self.log.log(f"SAM yüklenemedi: {e}", "warning")
-        return getattr(self, "_sam", None)
+                st["error"] = str(e)
+            st["finished"] = True
+
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
+        self._sam_poll()
+
+    def _make_sam_progress_window(self):
+        win = ctk.CTkToplevel(self)
+        win.title("SAM modeli")
+        win.geometry("420x130")
+        win.resizable(False, False)
+        win.transient(self)
+        self._sam_label = ctk.CTkLabel(win, text="SAM modeli indiriliyor…", font=ctk.CTkFont(size=13))
+        self._sam_label.pack(padx=20, pady=(20, 10))
+        self._sam_bar = ctk.CTkProgressBar(win, width=360)
+        self._sam_bar.set(0)
+        self._sam_bar.pack(padx=20, pady=(0, 10))
+        return win
+
+    def _sam_poll(self):
+        st = self._sam_state
+        win = getattr(self, "_sam_progress_win", None)
+        if win is not None and st["phase"] == "download":
+            if st["total"]:
+                frac = st["done"] / st["total"]
+                self._sam_bar.set(frac)
+                self._sam_label.configure(text=f"SAM modeli indiriliyor… %{int(frac * 100)} "
+                                               f"({st['done'] / 1e6:.0f} / {st['total'] / 1e6:.0f} MB)")
+            else:
+                self._sam_bar.configure(mode="indeterminate")
+                self._sam_bar.start()
+        elif win is not None and st["phase"] == "load":
+            self._sam_bar.stop()
+            self._sam_bar.configure(mode="determinate")
+            self._sam_bar.set(1)
+            self._sam_label.configure(text="SAM modeli yükleniyor…")
+        if not st["finished"]:
+            self.after(150, self._sam_poll)
+            return
+        if win is not None:
+            win.destroy()
+            self._sam_progress_win = None
+        if st["error"]:
+            self.log.log(f"SAM hazırlanamadı, OpenCV kullanılacak: {st['error']}", "warning")
+        elif self._sam is not None:
+            self.log.log("SAM hazır. Otomatik seçim SAM ile yapılacak.", "info")
 
     # ── Köşe düzenleme adaptörü (ana Annotated paneli) ───────────────────────
 
