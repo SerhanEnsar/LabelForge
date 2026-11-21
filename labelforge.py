@@ -1887,6 +1887,7 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
         def worker():
             st = self._sam_state
             try:
+                pip_error = None
                 if need_pip:
                     st["phase"] = "pip"
                     todo = bootstrap.missing(bootstrap.SAM_PACKAGES)
@@ -1894,12 +1895,15 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
                         st["line"] = line
                     ok, last = bootstrap.pip_install(todo, on_line)
                     if not ok:
-                        raise RuntimeError(f"paket kurulamadı ({', '.join(todo)}): {last}")
+                        pip_error = f"paket kurulamadı ({', '.join(todo)}): {last}"
+                # Model indirmesi paket kurulumundan bağımsız: pip başarısız olsa da model iner.
                 if need_download:
                     st["phase"] = "download"
                     def cb(done, total):
                         st["done"], st["total"] = done, total
                     download_file(SAM_URL, SAM_CHECKPOINT, cb)
+                if pip_error:
+                    raise RuntimeError(pip_error)
                 st["phase"] = "load"
                 self._sam = load_sam(SAM_CHECKPOINT)
             except Exception as e:
@@ -1923,14 +1927,16 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
     def _make_sam_progress_window(self):
         win = ctk.CTkToplevel(self)
         win.title("SAM modeli")
-        win.geometry("420x130")
+        win.geometry("440x190")
         win.resizable(False, False)
         win.transient(self)
-        self._sam_label = ctk.CTkLabel(win, text="SAM modeli indiriliyor…", font=ctk.CTkFont(size=13))
+        self._sam_label = ctk.CTkLabel(win, text="SAM modeli indiriliyor…", font=ctk.CTkFont(size=13),
+                                       wraplength=400, justify="center")
         self._sam_label.pack(padx=20, pady=(20, 10))
         self._sam_bar = ctk.CTkProgressBar(win, width=360)
         self._sam_bar.set(0)
         self._sam_bar.pack(padx=20, pady=(0, 10))
+        self._sam_close = ctk.CTkButton(win, text="Kapat", width=100, command=win.destroy)
         return win
 
     def _sam_poll(self):
@@ -1964,12 +1970,22 @@ class LabelForgeApp(VertexEditMixin, ctk.CTk):
     def _sam_finish(self):
         st = self._sam_state
         win = getattr(self, "_sam_progress_win", None)
+        if st["error"]:
+            self.log.log(f"SAM hazırlanamadı, OpenCV kullanılacak: {st['error']}", "warning")
+            if win is not None:
+                # Hata pencerede kalsın ki kullanıcı ne olduğunu görsün; Kapat ile kapatır.
+                self._sam_bar.stop()
+                self._sam_bar.configure(mode="determinate")
+                self._sam_bar.set(0)
+                self._sam_label.configure(text="SAM hazırlanamadı, otomatik seçim OpenCV ile yapılacak.\n"
+                                               + st["error"][:160])
+                self._sam_close.pack(pady=(0, 10))
+                self._sam_progress_win = None
+            return
         if win is not None:
             win.destroy()
             self._sam_progress_win = None
-        if st["error"]:
-            self.log.log(f"SAM hazırlanamadı, OpenCV kullanılacak: {st['error']}", "warning")
-        elif self._sam is not None:
+        if self._sam is not None:
             self.log.log("SAM hazır. Otomatik seçim SAM ile yapılacak.", "info")
 
     # ── Köşe düzenleme adaptörü (ana Annotated paneli) ───────────────────────
